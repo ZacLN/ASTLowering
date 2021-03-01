@@ -1,5 +1,7 @@
 module Lowering
 
+# currently matching commit 0f8eaa66ee04ae4198a8dab78976a0875853d83f
+
 ## Some global stuff
 
 UNUSED = :var"#unused#"
