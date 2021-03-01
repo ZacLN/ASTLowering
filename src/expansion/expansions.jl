@@ -460,11 +460,12 @@ function expand_call(e)
             length(e.args) < 4 && error("too few arguments to ccall")
             cconv = e.args[3]
             have_cconv = cconv in (:cdecl, :stdcall, :fastcall, :thiscall, :llvmcall)
-            after_cconv = have_cconv ? e.args[5:end] : e.args[4:end]
+            after_cconv = have_cconv ? e.args[4:end] : e.args[3:end]
             name = e.args[2]
             RT = after_cconv[1]
             argtypes = after_cconv[2]
             args = after_cconv[3:end]
+            @info argtypes
             if !(argtypes isa Expr && argtypes.head === :tuple)
                 if RT isa Expr && RT.head === :tuple
                     error("ccall argument types must be a tuple; try \"(T,)\" and check if you specified a correct return type")
@@ -472,7 +473,7 @@ function expand_call(e)
                     error("ccall argument types must be a tuple; try \"(T,)\"")
                 end
             end
-            expand_forms(lower_ccall(name, RT, argtypes[2:end], args, have_cconv ? cconv : :ccall))
+            expand_forms(lower_ccall(name, RT, argtypes.args, args, have_cconv ? cconv : :ccall))
         elseif any(iskwarg, e.args[2:end])
             expand_forms(lower_kw_call(f, e.args[2:end]))
         elseif has_parameters(e.args[2:end])
@@ -872,9 +873,41 @@ function linenode_string(lno)
 end
 
 
-# function lower_ccall(name, RT, atypes, args, cconv)
-    
-# end
+function lower_ccall(name, RT, atypes, args, cconv)
+    function loop(stmts, T, C, GC, ai = 1, fi = 1)
+        isempty(atypes) && !isempty(args) && error("more arguments than types for ccall")
+        isempty(args) && !(isempty(atypes) || (!isempty(atypes) && isvararg(first(atypes)) && length(atypes) == 1)) && error("more types than arguments for ccall")
+        isseq = !isempty(atypes) && isvararg(first(atypes))
+        isseq && isempty(T) && error("C ABI prohibits varag without one required argument")
+        if ai > length(args)
+            block(stmts...,
+                Expr(:foreigncall, name, RT, call(core(:svec), T...),
+                    isseq ? length(atypes) - 1 : 0,
+                    cconv,
+                    C...,
+                    GC...)
+            )
+        else
+            a = args[ai]
+            ty = isseq ? atypes[fi] : atypes[fi]
+            isseq && !(fi == length(atypes)) && error("only the trailing ccall argument type should have \"...\"")
+            if ty == :Any
+                push!(T, core(:Any))
+                push!(C, a)
+                loop(stmts, T, C, GC, ai + 1, fi + !isseq)
+            else
+                g = make_ssavalue()
+                push!(stmts, make_assignment(g, call(top(:convert), ty, a)))
+                ca = call(top(:unsafe_convert), ty, g)
+                push!(T, ty)
+                push!(C, ca)
+                push!(GC, g)
+                loop(stmts, T, C, GC, ai + 1, fi + !isseq)
+            end
+        end
+    end
+    loop([], [], [], [])
+end
 
 function flatten_all_where_expr(e)
     if e isa Expr && e.head == :where
