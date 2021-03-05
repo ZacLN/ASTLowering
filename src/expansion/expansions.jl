@@ -1,7 +1,7 @@
 function expand_let(e::Expr, ishard::Bool = true)
     ex = e.args[2]
     binds = let_binds(e)
-    hs = ishard ? (Expr(:hardscope),) : ()
+    hs = ishard ? (:hardscope,) : ()
     expand_forms(
     if isempty(binds)
         blk = scope_block(block(hs..., ex))
@@ -23,22 +23,23 @@ function expand_let(e::Expr, ishard::Bool = true)
                         end,
                         bind,
                         blk))
-                elseif issymbol(bind.args[1]) || isdecl(bind.args[1])
-                    vname = decl_var(bind.args[1])
-                    blk = if expr_contains_eq(vname, bind.args[2])
-                        scope_block(block(
-                            hs...,
-                            make_assignment(:tmp, bind.args[2]),
-                            scope_block(block(local_def(bind.args[1]),
-                            make_assignment(vname, :tmp),
-                            blk))))
-                    else
-                        scope_block(block(
-                            hs...,
-                            local_def(bind.args[1]),
-                            make_assignment(vname, bind.args[2]),
-                            blk))
-                    end
+                    elseif issymbol(bind.args[1]) || isdecl(bind.args[1])
+                        vname = decl_var(bind.args[1])
+                        blk = if expr_contains_eq(vname, bind.args[2])
+                            tmp = make_ssavalue()
+                            scope_block(block(
+                                hs...,
+                                make_assignment(tmp, bind.args[2]),
+                                scope_block(block(local_def(bind.args[1]),
+                                make_assignment(vname, tmp),
+                                blk))))
+                        else
+                            scope_block(block(
+                                hs...,
+                                local_def(bind.args[1]),
+                                make_assignment(vname, bind.args[2]),
+                                blk))
+                        end
                 elseif bind.args[1] isa Expr && bind.args[1].head == :tuple
                     vars = lhs_vars(bind.args[1])
                     blk = if expr_contains_p(x -> x in vars, bind.args[2])
@@ -53,7 +54,7 @@ function expand_let(e::Expr, ishard::Bool = true)
                     else
                         scope_block(block(
                             hs...,
-                            map(local_def, vars),
+                            map(local_def, vars)...,
                             bind,
                             blk))
                     end
@@ -86,21 +87,17 @@ function expand_macro_def(e)
 end
 
 function expand_lambda(e)
-    ex = Expr(:lambda, map(expand_forms, e.args[1]))
+    ex = Expr(:lambda, e.args[1] isa Expr ? expand_args_forms(e.args[1]) : expand_forms(e.args[1]))
     length(e.args) == 2 && push!(ex.args, ())
     for i = 2:length(e.args)
         push!(ex.args, expand_forms(e.args[i]))
     end
     ex
-    # Expr(:lambda, 
-    #     map(expand_forms, e.args[1]),
-    #     (length(e.args) == 2 ? [()] : ())...,
-    #     map(expand_forms, e.args[2:end])...)
 end
 
 function expand_block(e::Expr)
     if isempty(e.args)
-        nothing
+        :null
     elseif length(e.args) == 1 && !islinenum(e.args[1])
         expand_forms(e.args[1])
     else
@@ -116,29 +113,30 @@ function _expand_for_nest(lhss, itrs, body, copied_vars, i)
     state = make_ssavalue()
     outer = isouter(lhss[i])
     lhs = outer ? lhss[i].args[1] : lhss[i]
-    body = block(!outer ? map(v -> Expr(:local, v), lhs_vars(lhs)) : (),
+    body = block((!outer ? map(v -> Expr(:local, v), lhs_vars(lhs)) : ())...,
         lower_tuple_assignment([lhs, state], next),
         _expand_for_nest(lhss, itrs, body, copied_vars, i + 1))
-
-    body = if i > length(lhss)
-        Expr(:var"break-block", :var"loop-cont", Expr(:soft_let, block(map(v -> make_assignment(v, v), copied_vars)...), body))
-    else
-        scope_block(body)
-    end
+        body = if i == length(lhss)
+            Expr(:var"break-block",
+            :var"loop-cont", 
+            Expr(:var"soft-let", block(map(v -> make_assignment(v, v), copied_vars)...), body))
+        else
+            scope_block(body)
+        end
 
     block(
         make_assignment(coll, itrs[i]),
         Expr(:local, next),
         make_assignment(next, call(top(:iterate), coll)),
         (if outer
-            (Expr(:var"require-existing-local", lhs))
+            [Expr(:var"require-existing-local", lhs)]
         else
             ()
         end)...,
-        Expr(:if, call(top(:not_int), call(core(:(===)), next, nothing)),
+        Expr(:if, call(top(:not_int), call(core(:(===)), next, :null)),
             Expr(:_do_while, block(body,
                 make_assignment(next, call(top(:iterate), coll, state)),
-                call(top(:not_int), call(core(:(===)), next, nothing))
+                call(top(:not_int), call(core(:(===)), next, :null))
             ))
         )
     )
@@ -160,8 +158,7 @@ function expand_for(e)
 end
 
 function expand_for(lhss, iters, body)
-    copied_vars = unique(filter(x -> !isunderscore_symbol(x), vcat(map(lhs_vars, filter(!isouter, lhss[1:end-1])))))
-
+    copied_vars = unique(filter(x -> !isunderscore_symbol(x), vcat(map(lhs_vars, filter(!isouter, lhss[1:end-1]))...)))
     Expr(:var"break-block",
         :var"loop-exit",
         _expand_for_nest(lhss, iters, body, copied_vars, 1)
@@ -171,12 +168,12 @@ end
 function expand_vect(e)
     has_parameters(e.args) && error("unexpected semicolon in array expression")
     any(isassignment, e.args) && error("misplaced assignment in $(deparse(e))")
-    expand_forms(Expr(:call, top(:vect), e.args))
+    expand_forms(Expr(:call, top(:vect), e.args...))
 end
 
 function expand_hcat(e)
     any(isassignment, e.args) && error("misplaced assignment in $(deparse(e))")
-    expand_forms(Expr(:call, top(:hcat), e.args))
+    expand_forms(Expr(:call, top(:hcat), e.args...))
 end
 
 function expand_vcat(e)
@@ -202,7 +199,7 @@ function expand_typed_hcat(e)
 end
 
 function expand_typed_vcat(e)
-    t = e.agrs[1]
+    t = e.args[1]
     a = e.args[2:end]
     any(isassignment, a) && error("misplaced assignment statement in \"$(deparse(e))\"")
     expand_forms(
@@ -319,7 +316,7 @@ function expand_const_decl(e)
     else
         if arg.head in (:global, :local, :var"local-def")
             foreach(b -> !isassignment(b) && error("expected assignment after \"const\""), arg.args)
-            expand_forms(expand_delcs(arg.head, arg.args, true))
+            expand_forms(expand_decls(arg.head, arg.args, true))
         elseif arg.head in (:(=), :(::))
             expand_forms(expand_decls(:const, e.args, false))
         else
@@ -377,7 +374,7 @@ function expand_decls(what, binds, isconst)
 
     block((isconst ? map(x -> Expr(:const, x), vars) : ())..., 
         map(x -> Expr(what, x), vars)...,
-        assigns)
+        assigns...)
 end
 
 function expand_decl(e)
@@ -465,7 +462,6 @@ function expand_call(e)
             RT = after_cconv[1]
             argtypes = after_cconv[2]
             args = after_cconv[3:end]
-            @info argtypes
             if !(argtypes isa Expr && argtypes.head === :tuple)
                 if RT isa Expr && RT.head === :tuple
                     error("ccall argument types must be a tuple; try \"(T,)\" and check if you specified a correct return type")
@@ -525,7 +521,7 @@ function lower_kw_call(f, args)
     
     kws, pargs = separate(iskwarg, cargs)
     block(
-        parg_stmts.args...,
+        parg_stmts[2]...,
         lower_kw_call_(fexpr, vcat(kws, para), pargs)
         )
 end
@@ -586,6 +582,78 @@ function lower_tuple_assignment(lhss, x)
     )
 end
 
+function lower_named_tuple(lst, dup_error_fn = name -> string("field name \"",name,"\" repeated in named tuple"), name_str = "named tuple field", synatx_str = "named tuple element", call_with_keyword_arguments = false)
+    named_tuple_dup_check(lst, dup_error_fn)
+    notvararg(x) = isvararg(x) ? error("\"...\" expression cannot be used as $name_str value") : x
+    to_nt(n, v) = isempty(n) ? false : named_tuple_expr(reverse!(map(quotify, n)), reverse(v))
+    merge_(old, new) = old !== false ? (new !== false ? call(top(:merge), old, new) : old) : new
+    
+    
+    current_names, current_vals, expr = [], [], false
+    
+    for el in lst
+        if isassignment(el) || iskwarg(el)
+            !issymbol(el.args[1]) && error("invalid $name_str name $(deparse(el.args[1]))")
+            notvararg(el.args[2])
+            push!(current_names, el.args[1])
+            push!(current_vals, el.args[2])
+        elseif issymbol(el)
+            push!(current_names, el)
+            push!(current_vals, el)
+        elseif el isa Expr && el.head == :. && length(el.args) == 2 && isquoted_sym(el.args[2])
+            push!(current_names, el.args[2] isa QuoteNode ? el.args[2].value : el.args[2].args[1])
+            push!(current_vals, el)
+        elseif el isa Expr && length(el.args) == 3 && el.head == :call && el.args[1]  == :(=>)
+            expr = merge_(merge_(expr, to_nt(current_names, current_vals)), named_tuple_expr([el.args[2]], [notvararg(el.args[3])]))
+            current_names, current_vals = [], []
+        elseif isvararg(el)
+            current = merge_(expr, (to_nt(current_names, current_vals)))
+            expr = if current !== false
+                merge_(current, el.args[1])
+            else
+                call(top(:merge), call(top(:NamedTuple)), el.args[1])
+            end
+            current_names, current_vals = [], []
+        elseif call_with_keyword_arguments && has_parameters(el)
+            error("more than one semicolon in argument list")
+        else
+            error("invalid $synatx_str \"$(deparse(el))\"")
+        end
+    end
+
+    m = merge_(expr, to_nt(current_names, current_vals))
+    if m !== false
+        m
+    else
+        call(core(:NamedTuple))
+    end
+end
+
+function named_tuple_expr(names, values)
+    call(Expr(:curly, core(:NamedTuple) ,Expr(:tuple, names...)), call(core(:tuple), values...))
+end
+
+function named_tuple_dup_check(lst, dup_error_fn)
+    let names = Set()
+        for x in lst
+            if issymbol(x) 
+                n = x
+            elseif (isassignment(x) || iskwarg(x)) && issymbol(x.args[1])
+                n = x.args[1]
+            elseif x isa Expr && x.head == :. && length(x.args) == 2
+                n = x.args[2].value
+            else
+                continue
+            end
+            if n in names
+                error(dup_error_fn(n))
+            else
+                push!(names, n)
+            end
+        end
+    end
+end
+
 function expand_comprehension(e)
     if length(e.args) > 1
         expand_forms(Expr(:comprehension, Expr(:generator, e.args...)))
@@ -603,7 +671,7 @@ function expand_typed_comprehension(e)
             end
             lower_comprehension(e.args[1], e.args[2].args[1], e.args[2].args[2:end])
         else
-            call(top(:collect), e.args[1], e.agrs[2])
+            call(top(:collect), e.args[1], e.args[2])
         end
     )
 end
@@ -624,24 +692,20 @@ function lower_comprehension(ty, expr, itrs)
             block(
                 make_assignment(oneresult, expr),
                 Expr(:inbounds, true),
-                if szunk
-                    call(top(:push!), result, oneresult)
-                else
-                    call(top(:setindex!), result, oneresult, idx)
-                end,
+                Expr(:if, szunk, call(top(:push!), result, oneresult), call(top(:setindex!), result, oneresult, idx)),
                 Expr(:inbounds, :pop),
                 make_assignment(idx, call(top(:add_int), idx, 1))
             )
         else
-            Expr(:for, make_assignment(itrs[i], iv[i]), construct_loops(itrs, iv, i + 1))    
+            Expr(:for, make_assignment(itrs[i].args[1], iv[i]), construct_loops(itrs, iv, i + 1))    
         end
     end
 
     overall_itr = length(itrs) == 1 ? first(iv) : prod
     scope_block(block(
         Expr(:local, result), Expr(:local, idx),
-        map((v,r) -> make_assignment(v, r.args[2]), iv, itrs),
-        length(itrs) == 1 ? () : make_assignment(prod, call(top(:product), iv...)),
+        map((v,r) -> make_assignment(v, r.args[2]), iv, itrs)...,
+        (length(itrs) == 1 ? () : [make_assignment(prod, call(top(:product), iv...))])...,
         make_assignment(isz, call(top(:IteratorSize), overall_itr)),
         make_assignment(szunk, call(core(:isa), isz, top(:SizeUnknown))),
         Expr(:if, szunk, 

@@ -106,6 +106,7 @@ function convert_assignment(var, rhs0, fname, lame, interp, opaq)
                 block(ex, rhs0)
             else
                 block(make_assignment(rhs1, rhs0), ex, rhs1)
+            end
         end
     elseif isouterref(var) || isglobalref(var)
         make_assignment(var, rhs0)

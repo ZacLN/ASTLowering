@@ -178,7 +178,7 @@ function expand_eq(e)
             a = lhs.args[1]
             b = lhs.args[2]
             rhs = e.args[2]
-            if length(b.args) == 1 && b.head === :tuple
+            if b isa Expr && b.head === :tuple && length(b.args) == 1
                 error("invalid syntax") # todo
             end
             aa = issymbol_like(a) ? a : make_ssavalue()
@@ -284,7 +284,7 @@ function expand_eq(e)
             rhs = e.args[2]
             # todo: what is output of remove_argument_side_effects?
             e = remove_argument_side_effects(x)
-            expand_forms(Expr(:block, e.args..., 
+            expand_forms(Expr(:block, e[2]..., 
                 Expr(:decl, e[1], T),
                 Expr(:(=), e[1], rhs)))
         elseif lhs.head === :vcat
@@ -395,8 +395,8 @@ end
 
 function expand_unionall_def(name, type_ex)
     if iscurly(name)
-        name = name.args[1]
         params = name.args[2:end]
+        name = name.args[1]
         isempty(params) && error("empty type parameter list in $name")
         block(
             Expr(:var"const-if-global", name), 

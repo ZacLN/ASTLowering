@@ -67,7 +67,7 @@ make_assignment(l, r) = Expr(:(=), l, r)
 local_def(x) = Expr(:var"local-def", x)
 scope_block(args...) = Expr(:var"scope-block", args...)
 block(args...) = Expr(:block, args...)
-blockify(e) = e isa Expr && e.head == :block ? (isempty(e.args) ? block(nothing) : e) : block(e)
+blockify(e) = e isa Expr && e.head == :block ? (isempty(e.args) ? block(:null) : e) : block(e)
 quotify(e) = Expr(:quote, e)
 
 undot_name(e) = e isa Expr && e.head == :. ? e.args[2].args[1] : e
@@ -413,6 +413,8 @@ function isnodot_sym_ref(e)
     (length(e.args) == 2 && e.head == :globalref) ||
     (length(e.args) == 1 && e.head == :outerref))
 end
+
+isquoted_sym(x) = (x isa QuoteNode && issymbol(x.value)) || (x isa Expr && x.head in (:quote, :inert) && length(x.args) == 1 && issymbol(x.args[1]))
 
 function issym_ref(e)
     isnodot_sym_ref(e) ||

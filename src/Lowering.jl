@@ -11,6 +11,8 @@ const gensyms = []
 const current_gensyms = []
 const _current_julia_module_counter = [1]
 current_julia_module_counter() = _current_julia_module_counter[1]
+_false = :var"false"
+_true = :var"true"
 
 include("utils.jl")
 include("expansion/methods.jl")
@@ -23,6 +25,10 @@ include("resolvescopes.jl")
 include("analyzevars.jl") 
 
 include("closures.jl")
+
+include("linearize.jl")
+
+include("expandmacros.jl")
 
 # resets ssacounter
 function lower(ex)
@@ -62,6 +68,30 @@ function julia_expand(ex, file = :none, line = 0)
     ex
 end
 
+function expand_toplevel_expr__(e, file, line)
+    ex0 = julia_expand_macroscope(e)
+    if istoplevel_only_expr(ex0)
+        ex0
+    else
+        ex = julia_expand0(ex0, file, line)
+        th = julia_expand1(Expr(:lambda, [], [], scope_block(blockify(ex))), file, line)
+        if length(th.args[1].args[1].args) == 1 && false
+        else
+            Expr(:thunk, th)
+        end
+    end
+end
+
+function istoplevel_only_expr(e)
+    e isa Expr && (e.head in (:toplevel, :line, :module, :import, :using, :export, :error, :incomplete) || (e.head in (:global, :const) && all(issymbol, e.args)))
+end
+
+function expand_toplevel_expr(e, file, line)
+    if isatom(e) || istoplevel_only_expr(e)
+        isunderscore_symbol(e) && error("all-underscore")
+    end
+end
+
 function Base.show_unquoted_expr_fallback(io::IO, ex::Expr, indent::Int, quote_level::Int)
     if ex.head == :method
         print(io, "Method(")
@@ -70,6 +100,9 @@ function Base.show_unquoted_expr_fallback(io::IO, ex::Expr, indent::Int, quote_l
             i < length(ex.args) && print(io, ", ")
         end
         print(io, ")")
+        return
+    elseif ex.head in (:var"scope-block", :var"break-block", :var"_do_while")
+        Base.show_block(io, ex.head, [], Expr(:block, ex.args...), indent, quote_level)
         return
     elseif ex.head in (:core, :top)
         print(io, "$(ex.head).$(ex.args[1])")

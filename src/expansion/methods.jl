@@ -66,7 +66,7 @@ function expand_function_def_(e)
 end
 
 
-function method_def_expr(name, sparams, argl, body, rett)
+function method_def_expr(name, sparams, argl::Vector, body, rett)
     argl = throw_unassigned_kw_args(remove_empty_parameters(argl))
     if has_parameters(argl)
         check_kw_args(argl[1].args)
@@ -76,7 +76,7 @@ function method_def_expr(name, sparams, argl, body, rett)
     end
 end
 
-function method_def_expr_(name, sparams, argl, body, rett = Expr(:core, :Any))
+function method_def_expr_(name, sparams, argl::Vector, body, rett = Expr(:core, :Any))
     if any(iskwarg, argl)
         seen = false
         for l in argl 
@@ -95,12 +95,11 @@ function method_def_expr_(name, sparams, argl, body, rett = Expr(:core, :Any))
         vararg, req = separate(isvararg, argl)
         optional_positional_defs(name, sparams, req, opt, dfl, body, [req;opt;vararg], rett)
     else
-        
         names = map(x->x[1], sparams) # need to check format of sparams
         anames = map(x -> isunderscore_symbol(x) ? UNUSED : x, llist_vars(argl))
         unused_names = filter(x -> x != UNUSED, anames)
         ename = isnodot_sym_ref(name) ? name : :nothing
-        
+
         if has_dups(unused_names)
             error("function argument name not unique")
         end
@@ -221,21 +220,22 @@ function lower_destructuring_args(argl)
             push!(stmts, a[2])
         end
     end
-    newa, isempty(stmts) ? stmts : [nothing]
+    newa, isempty(stmts) ? stmts : [:null]
 end
 
 
 function method_lambda_expr(argl::Vector, body::Expr, rett)
     argl = map(function (x)
-            n = arg_name(x)
-            if isunderscore_symbol(n)
-                UNUSED
-            else
-                n
-            end
-        end, argl)
+        n = arg_name(x)
+        if isunderscore_symbol(n)
+            UNUSED
+        else
+            n
+        end
+    end, argl)
     body = blockify(body)
-    Expr(:lambda, argl, (), scope_block(if rett == Expr(:core, :Any)
+    
+    Expr(:lambda, (length(argl) == 1 ? argl[1] : Expr(argl...)), (), scope_block(if rett == Expr(:core, :Any)
             body
         else
             meta = take_while(x -> ispair(x) && x.head in (:line, :meta), body.args)
@@ -294,8 +294,8 @@ function keywords_method_def_expr(name, sparams, argl, body, rett)
     # call with keyword args pre-sorted - original method code goes here
     methdef1 = method_def_expr_(mangled, 
                         sparams, 
-                        (Expr(:(::), mangled, call(core(:typeof)), mangled), vars..., restkw..., not_optional..., vararg...),
-                        insert_after_meta(Expr(:block, stmts), [meta(:nkw, length(vars) + length(restkw)), annotations]), 
+                        [Expr(:(::), mangled, call(core(:typeof)), mangled), vars..., restkw..., not_optional..., vararg...],
+                        insert_after_meta(Expr(:block, stmts...), [meta(:nkw, length(vars) + length(restkw)), annotations...]), 
                         rett)
     # call with no keyword args
     methdef2 = method_def_expr_(
@@ -318,7 +318,7 @@ function keywords_method_def_expr(name, sparams, argl, body, rett)
     
     methdef3 = method_def_expr_(name, 
                 positional_sparams, 
-                (Expr(:(::), any(iskwarg, pargl) ? gensy() : UNUSED, call(core(:kwftype)), ftype), kw, pargl..., vararg...), 
+                [Expr(:(::), any(iskwarg, pargl) ? gensy() : UNUSED, call(core(:kwftype)), ftype), kw, pargl..., vararg...], 
                 Expr(:block,
                     filter(islinenum, prologue)...,
                     map(m -> meta(m.args[1], filter(v -> !(v in keynames), m.args[2:end])), filter(isnospecialize_meta, prologue))...,
@@ -329,7 +329,7 @@ function keywords_method_def_expr(name, sparams, argl, body, rett)
                             T = v.args[2]
                             temp = make_ssavalue()
                             Expr(:block, make_assignment(temp, rval0),
-                                Expr(:if, call(core(:isa), temp, T), nothing, call(core(:throw), Expr(:new, core(:TypeError), inert(:var"keyword argument"), inert(k), T, temp))), temp)
+                                Expr(:if, call(core(:isa), temp, T), :null, call(core(:throw), Expr(:new, core(:TypeError), inert(:var"keyword argument"), inert(k), T, temp))), temp)
                         else
                             rval0
                         end
@@ -337,19 +337,19 @@ function keywords_method_def_expr(name, sparams, argl, body, rett)
                     end, vars, vals),
                     Expr(:block,
                         Expr(:(=), rkw, call(top(:pairs), isempty(keynames) ? kw : call(top(:structdiff), kw, Expr(:curly, core(:NamedTuple), Expr(:tuple, map(quotify, keynames)...))))),
-                        (isempty(restkw) ? [Expr(:if, call(top(:isempty), rkw), nothing, call(top(:kwerr), kw, map(arg_name, pargl)..., (isempty(vararg) ? () : [Expr(:..., arg_name(vararg[1]))])...))] : [])...,
+                        (isempty(restkw) ? [Expr(:if, call(top(:isempty), rkw), :null, call(top(:kwerr), kw, map(arg_name, pargl)..., (isempty(vararg) ? () : [Expr(:..., arg_name(vararg[1]))])...))] : [])...,
                         Expr(:return, call(mangled, 
                                         keynames..., 
-                                        (isempty(restkw) ? () : rkw)...,
+                                        (isempty(restkw) ? () : [rkw])...,
                                         map(arg_name, pargl)...,
                                         (isempty(vararg) ? () : [Expr(:..., arg_name(first(vararg)))])...))))))
     
-    Expr(:call, core(:ifelse), false, false, block(
+    Expr(:call, core(:ifelse), _false, _false, block(
         methname,
         methdef1,
         methdef2,
         methdef3,
-        !issymbol(name) ? nothing : name
+        !issymbol(name) ? :null : name
     ))
 end
 
@@ -397,8 +397,8 @@ end
 function filter_sparams(expr, sparams)
     filtered = []
     for (i,p) in enumerate(sparams)
-        if expr_contains_eq(p.args[1], expr) ||
-            any(v -> expr_contains_eq(p.args[1], v), sparams[i+1:end])
+        if expr_contains_eq(p[1], expr) ||
+            any(v -> expr_contains_eq(p[1], v), sparams[i+1:end]) # todo : optimize
             push!(filtered, p)
         end
     end
@@ -409,7 +409,7 @@ function optional_positional_defs(name, sparams, req, opt, dfl, body, overall_ar
     prologue = without_generated(extract_method_prologue(body))
     Expr(:block,
         map(function (n)
-            passed = [req; opt[1:end - n]]
+            passed = [req; opt[1:n-1]]
             sp = filter_sparams(Expr(:list, passed), sparams)
             vals = list_tail(dfl, n)
             absent = list_tail(opt, n)
