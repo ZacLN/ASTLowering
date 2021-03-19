@@ -114,7 +114,6 @@ function compile_body(e, vi, lam)
             pexc = pop_exc_expr(catch_token_stack, [])
             pexc !== false && emit(pexc)
             emit(Expr(:return, tmp !== false ? tmp : x))
-
         end
 
         if x
@@ -255,18 +254,22 @@ function compile_body(e, vi, lam)
                 false
             end
         else
-            if e.head in (:new, :splatnew, :foreigncall, :cfunction, :new_opaque_closure)
-                # args = if e.head === :foreigncall
-                #     fptr = e.args[1]
-                #     vcat(isatom(fptr) || !istuple_call(fptr) ? compile_args([e.args[1]],        break_labels) : [e.args[1]],
-                #         list_head(e.args[2:end], 4), 
-                #         compile_args(e.args[5:end], break_labels)
-                #     )
-                # elseif e.head === :cfunction
-                #     fptr = first(compile_args([e.args[2]], break_labels))
-                #     [e.args[1], fptr; e.args[3:end]]
-                # elseif length(e.args) > 1 && e.args[1] isa Expr && e.args[1].head
-                # end
+            if e.head in (:call, :new, :splatnew, :foreigncall, :cfunction, :new_opaque_closure)
+                args = if e.head === :foreigncall
+                    fptr = e.args[1]
+                    vcat(isatom(fptr) || !istuple_call(fptr) ? compile_args([e.args[1]],        break_labels) : [e.args[1]],
+                        list_head(e.args[2:end], 4), 
+                        compile_args(e.args[5:end], break_labels)
+                    )
+                elseif e.head === :cfunction
+                    fptr = first(compile_args([e.args[2]], break_labels))
+                    [e.args[1]; fptr; e.args[3:end]]
+                elseif length(e.args) > 1 && e.args[1] === :cglobal || e.args[1] == Expr(:outerref, :cglobal)
+                    [e.args[1]; e.args[2]; compile_args(e.args[3:end], break_labels)]
+                else
+                    compile_args(e.args, break_labels)
+                end
+                callex = Expr(e.head, args)
 
                 if tail
                     emit_return(callex)
@@ -276,9 +279,60 @@ function compile_body(e, vi, lam)
                     emit(callex)
                 end
             elseif e.head === :(=)
-
+                lhs = e.args[1]
+                if issymbol(lhs) && isunderscore_symbol(lhs)
+                    compile(e.args[2], break_labels, value, tail)
+                else
+                    rhs = compile(e.args[2], break_labels, true, false)
+                    lhs = arg_map !== false && issymbol(lhs) ? get(arg_map, lhs, lhs) : lhs
+                    if value && rhs
+                        rr = isatom(rhs) || isssavalue(rhs) || rhs == nothing ? rhs : make_ssavalue()
+                        if rr != rhs
+                            emit(make_assignment(rr, rhs))
+                        end
+                        emit(make_assignment(lhs, rr))
+                        tail ? emit_return(rr) : rr
+                    else
+                        emit_assignment(lhs, rhs)
+                    end
+                end
             elseif e.head === :block
-
+                last_fname = filename
+                fnm = first_non_meta(e.args)
+                fname = !isempty(e.args) && islinenum(fnm) && length(fnm.args) > 1 ? fnm.args[2] : filename
+                file_diff = fname != last_fname
+                need_meta = file_diff && last_fname !== false && e !== lam_body(lam)
+                if file_diff
+                    filename = fname
+                end
+                if need_meta
+                    emit(meta(:push_loc, fname))
+                end
+                for i in 1:length(e.args)
+                    if i == length(e.args)
+                        compile(e.args[i], break_labels, value, tail)
+                    else
+                        compile(e.args[i], break_labels, false, false)
+                    end
+                    if need_meta
+                        if !tail || (last(code) && last(code).head == :meta) # this is wrong
+                            emit(meta(:pop_loc))
+                        else
+                            retv = pop!(code)
+                            if iscomplex_return(retv)
+                                tmp = make_ssavalue()
+                                emit(make_assignment(tmp, retv.args[1]))
+                                emit(meta(:pop_loc))
+                                emit(Expr(:return, tmp))
+                            else
+                                emit(meta(:pop_loc))
+                                emit(retv)
+                            end
+                        end
+                    else
+                        file_diff && (filename = last_fname)
+                    end
+                end
             elseif e.head === :return
                 compile(e.args[1], break_labels, true, true)
                 false
@@ -571,9 +625,55 @@ function compile_body(e, vi, lam)
     body = block(filter(e -> !(e isa Expr && e.head === :newvar && haskey(di, e.args[1])), stmts))
 
     if arg_map !== false
-        # insert_after_meta(body, foldl())
+        argmap2 = []
+        for (k,v) in arg_map
+            push!(argmap2, make_assignment(v, k))
+        end
+        insert_after_meta(body, argmap2)
         error("L4399")
     else
         body
+    end
+end
+
+# Find newvar nodes that are unnecessary because (1) the variable is not
+# captured, and (2) the variable is assigned before any branches.
+# This is used to remove newvar nodes that are not needed for re-initializing
+# variables to undefined (see issue #11065).
+# It doesn't look for variable *uses*, because any variables used-before-def
+# that also pass this test are *always* used undefined, and therefore don't need
+# to be *re*-initialized.
+# The one exception to that is `@isdefined`, which can observe an undefined
+# variable without throwing an error.
+function definitely_initialized_vars(stmts, vi)
+    vars = Dict()
+    di = Dict()
+    for e in stmts
+        for_each_isdefined(x -> haskey(vars, x) && delete!(vars, x), e)
+        if isexpr(e, :newvar)
+            vinf = var_info_for(e.args[1], vi)
+            if vinf !== false && !capt(vinf)
+                vars[e.args[1]] = true
+            end
+        elseif e isa Expr && (e.head in (:goto, :gotoifnot) || 
+                (e.head == :(=) && isexpr(e.args[2], :enter)))
+            vars = Dict() # todo : needs to be recur func to allow new vars?
+        elseif isexpr(e, :(=))
+            if haskey(vars, e.args[1])
+                delete!(vars, e.args[1])
+                di[e.args[1]] = true
+            end
+        end
+    end
+    di
+end
+
+function for_each_isdefined(f, e)
+    if isatom(e) || isquoted(e)
+        false
+    elseif isexpr(e, :isdefined)
+        f(e.args[1])
+    else
+        foreach(x -> for_each_isdefined(f, x), e.args)
     end
 end

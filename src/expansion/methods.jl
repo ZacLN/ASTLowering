@@ -220,7 +220,7 @@ function lower_destructuring_args(argl)
             push!(stmts, a[2])
         end
     end
-    newa, isempty(stmts) ? stmts : [:null]
+    newa, isempty(stmts) ? stmts : [nothing]
 end
 
 
@@ -329,7 +329,7 @@ function keywords_method_def_expr(name, sparams, argl, body, rett)
                             T = v.args[2]
                             temp = make_ssavalue()
                             Expr(:block, make_assignment(temp, rval0),
-                                Expr(:if, call(core(:isa), temp, T), :null, call(core(:throw), Expr(:new, core(:TypeError), inert(:var"keyword argument"), inert(k), T, temp))), temp)
+                                Expr(:if, call(core(:isa), temp, T), nothing, call(core(:throw), Expr(:new, core(:TypeError), inert(:var"keyword argument"), inert(k), T, temp))), temp)
                         else
                             rval0
                         end
@@ -337,19 +337,19 @@ function keywords_method_def_expr(name, sparams, argl, body, rett)
                     end, vars, vals),
                     Expr(:block,
                         Expr(:(=), rkw, call(top(:pairs), isempty(keynames) ? kw : call(top(:structdiff), kw, Expr(:curly, core(:NamedTuple), Expr(:tuple, map(quotify, keynames)...))))),
-                        (isempty(restkw) ? [Expr(:if, call(top(:isempty), rkw), :null, call(top(:kwerr), kw, map(arg_name, pargl)..., (isempty(vararg) ? () : [Expr(:..., arg_name(vararg[1]))])...))] : [])...,
+                        (isempty(restkw) ? [Expr(:if, call(top(:isempty), rkw), nothing, call(top(:kwerr), kw, map(arg_name, pargl)..., (isempty(vararg) ? () : [Expr(:..., arg_name(vararg[1]))])...))] : [])...,
                         Expr(:return, call(mangled, 
                                         keynames..., 
                                         (isempty(restkw) ? () : [rkw])...,
                                         map(arg_name, pargl)...,
                                         (isempty(vararg) ? () : [Expr(:..., arg_name(first(vararg)))])...))))))
     
-    Expr(:call, core(:ifelse), _false, _false, block(
+    Expr(:call, core(:ifelse), false, false, block(
         methname,
         methdef1,
         methdef2,
         methdef3,
-        !issymbol(name) ? :null : name
+        !issymbol(name) ? nothing : name
     ))
 end
 

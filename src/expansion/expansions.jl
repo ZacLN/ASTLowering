@@ -97,7 +97,7 @@ end
 
 function expand_block(e::Expr)
     if isempty(e.args)
-        :null
+        nothing
     elseif length(e.args) == 1 && !islinenum(e.args[1])
         expand_forms(e.args[1])
     else
@@ -133,10 +133,10 @@ function _expand_for_nest(lhss, itrs, body, copied_vars, i)
         else
             ()
         end)...,
-        Expr(:if, call(top(:not_int), call(core(:(===)), next, :null)),
+        Expr(:if, call(top(:not_int), call(core(:(===)), next, nothing)),
             Expr(:_do_while, block(body,
                 make_assignment(next, call(top(:iterate), coll, state)),
-                call(top(:not_int), call(core(:(===)), next, :null))
+                call(top(:not_int), call(core(:(===)), next, nothing))
             ))
         )
     )
@@ -305,7 +305,6 @@ function expand_if(e)
             map(expand_forms, e.args[2:end])...)
     else
         expand_args_forms(e)
-        # Expr(e.head, map(expand_forms, e.args)...)
     end
 end
 
@@ -344,7 +343,7 @@ function expand_try(e)
     elseif length(e.args) == 3
         expand_forms(
             if issymbol_like(var)
-                Expr(:trycatch, scope_block(tryb),scope_block(block(make_assignment(var, Expr(:the_exception)), catchb)))
+                Expr(:trycatch, scope_block(tryb),scope_block(block(make_assignment(var, :the_exception), catchb)))
             else
                 Expr(:trycatch, scope_block(tryb), scope_block(catchb))
             end
@@ -395,11 +394,26 @@ end
 function partially_expand_ref(e)
     a = e.args[1]
     idxs = e.args[2:end]
-    reuse = a isa Expr && contains(x -> x == :begin || x == :end, idxs)
+    reuse = a isa Expr && any(idx -> contains(x -> x == :begin || x == :end, idx), idxs)
     arr = reuse ? make_ssavalue() : a
-    stmts = reuse ? make_assignment(arr, a) : ()
+    stmts = reuse ? make_assignment(arr, a) : nothing
     new_idxs, stuff = process_indices(arr, idxs)
-    block(vcat(stmts, stuff)..., call(top(:getindex), arr, new_idxs...))
+
+    # long winded but 50% faster
+    ex = Expr(:block)
+    if stmts !== nothing
+        push!(ex.args, stmts)
+    end
+    for a in stuff
+        push!(ex.args, a)
+    end
+    _call = call(top(:getindex), arr)
+    for id in new_idxs
+        push!(_call.args, id)
+    end
+    push!(ex.args, _call)
+    ex
+    # block(stmts..., stuff..., call(top(:getindex), arr, new_idxs...))
 end
 
 function expand_curly(e)
@@ -443,7 +457,6 @@ end
 
 function expand_string(e)
     expand_forms(call(top(:string), map(s -> s isa Expr && s.head === :string ? s.args[1] : s, e.args)...))
-    top
 end
 
 function expand_call(e)
@@ -470,15 +483,15 @@ function expand_call(e)
                 end
             end
             expand_forms(lower_ccall(name, RT, argtypes.args, args, have_cconv ? cconv : :ccall))
-        elseif any(iskwarg, e.args[2:end])
+        elseif any(iskwarg, view(e.args, 2:length(e.args)))
             expand_forms(lower_kw_call(f, e.args[2:end]))
-        elseif has_parameters(e.args[2:end])
+        elseif has_parameters(view(e.args, 2:length(e.args)))
             expand_forms(if isempty(e.args[2].args)
                 call(f, e.args[3:end])
             else
                 lower_kw_call(f, e.args[2:end])
             end)
-        elseif any(isvararg, e.args[2:end])
+        elseif any(isvararg, view(e.args, 2:length(e.args)))
             argl = e.args[2:end]
             function tuple_wrap(argl, run, i = 1)
                 if i > length(argl)
@@ -742,7 +755,7 @@ end
 
 function compare_one(e::Vector)
     arg = e[3]
-    arg2 = ispair(arg) && ispair(e[3]) ? make_ssavalue() : arg
+    arg2 = ispair(arg) && length(e) > 3 ? make_ssavalue() : arg
     if !isdotop_named(e[1]) && 
         length(e) == 5 && 
         ispair(e[4]) && 
@@ -753,7 +766,7 @@ function compare_one(e::Vector)
             make_assignment(s, e[5])
         ))
     else
-        (add_init(arg, arg2, Expr(:call, e[2], e[1], arg2)), e[3:end])
+        (add_init(arg, arg2, Expr(:call, e[2], e[1], arg2)), vcat(arg2, e[4:end]))
     end
 end
 
@@ -807,9 +820,7 @@ function replace_beginend(ex, a, n, tuples, last)
     elseif isatom(ex) || isquoted(ex)
         ex
     elseif ex.head === :ref
-        # Expr(:ref, replace_beginend(ex.args[1], a, n, tuples, last), ex.args[2:end]...) 
-        ex.args[1] = replace_beginend(ex.args, a, n, tuples, last)
-        ex
+        Expr(:ref, replace_beginend(ex.args[1], a, n, tuples, last), ex.args[2:end]...) 
     else
         Expr(ex.head, map(x -> replace_beginend(x, a, n, tuples, last), ex.args)...)
     end
@@ -882,15 +893,15 @@ function bounds_to_TypeVar(v, unmangle = false)
     uv = unmangle ? unmangled_name(v[1]) : v[1]
     if ub !== false
         if lb !== false
-            call(Expr(:core, :TypeVar), uv, lb, ub)
+            call(Expr(:core, :TypeVar), quotify(uv), lb, ub)
         else
-            call(Expr(:core, :TypeVar), uv, ub)
+            call(Expr(:core, :TypeVar), quotify(uv), ub)
         end
     else
         if lb !== false
-            call(Expr(:core, :TypeVar), uv, lb, Expr(:core, :Any))
+            call(Expr(:core, :TypeVar), quotify(uv), lb, Expr(:core, :Any))
         else
-            call(Expr(:core, :TypeVar), uv)
+            call(Expr(:core, :TypeVar), quotify(uv))
         end
     end
 end
@@ -1001,16 +1012,23 @@ end
 function expand_where(body, var)
     bounds = analyze_typevar(var)
     v = bounds[1]
-    Expr(:let, Expr(:(=), v, bounds_to_TypeVar(bounds)),
+    Expr(:let, make_assignment(v, bounds_to_TypeVar(bounds)),
         call(core(:UnionAll), v, body))
 end
 
-function expand_wheres(body, vars)
-    if isempty(vars)
+# function expand_wheres(body, vars)
+#     if isempty(vars)
+#         body
+#     else
+#         w = pop!(vars)
+#         expand_where(expand_wheres(body, vars), w)
+#     end
+# end
+function expand_wheres(body, vars, i = 1)
+    if i > length(vars)
         body
     else
-        w = pop!(vars)
-        expand_where(expand_wheres(body, vars), w)
+        expand_where(expand_wheres(body, vars, i + 1), vars[i])
     end
 end
 
@@ -1024,7 +1042,7 @@ end
 
 
 function expand_forms(e)
-    if isatom(e) || e.head in (:quote, :inert, :top, :core, :globalref, :outerref, :module, :toplevel, :ssavalue, :null, :true, :false, :meta, :using, :import, :export, :thismodule, :var"toplevel-module")
+    if isatom(e) || e isa Bool || e.head in (:quote, :inert, :top, :core, :globalref, :outerref, :module, :toplevel, :ssavalue, :null, :meta, :using, :import, :export, :thismodule, :var"toplevel-module")
         e
     else
         if haskey(expand_table, e.head)

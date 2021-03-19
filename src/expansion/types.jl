@@ -14,13 +14,13 @@ function abstract_type_def_expr(name, params, super)
             map(v -> Expr(:local, v), params)...,
             map((n,v) -> make_assignment(n, bounds_to_TypeVar(v, true)), params, bounds)...,
             Expr(:var"toplevel-only", :abstract_type),
-            make_assignment(name, call(core(:_abstracttype), Expr(:thismodule), inert(name), call(core(:svec), params...))),
+            make_assignment(name, call(core(:_abstracttype), (:thismodule), inert(name), call(core(:svec), params...))),
             call(core(:_setsuper!), name, super),
             call(core(:_typebody!), name),
             Expr(:if, Expr(:&&, Expr(:isdefined, outerref(name)), call(core(:_equiv_typedef), outerref(name), name)),
-                nothing,
+                :null,
                 make_assignment(outerref(name), name)),
-            nothing)))
+            :null)))
 end
 
 function expand_primitive(e)
@@ -40,7 +40,7 @@ function primitive_type_def_expr(n, name, params, super)
             map(v -> Expr(:local, v), params)...,
             map((n,v) -> make_assignment(n, bounds_to_TypeVar(v, true)), params, bounds)...,
             Expr(:var"toplevel-only", :primitive_type),
-            Expr(:(=), name, call(core(:_primitivetype), Expr(:thismodule), inert(name), call(core(:svec), params...), n)),
+            Expr(:(=), name, call(core(:_primitivetype), (:thismodule), inert(name), call(core(:svec), params...), n)),
             call(core(:_setsuper!), name, super),
             call(core(:_typebody!), name),
             Expr(:if, Expr(:&&, Expr(:isdefined, outerref(name)), (call(core(:_equiv_typedef), outerref(name), name))),
@@ -82,17 +82,17 @@ function struct_def_expr_(name, params::Vector, bounds, super, fields0, mut)
     
     has_dups(field_names) && error("duplicate field name")
     map(v -> !issymbol(v) && error("field name $v is not a symbol"), field_names)
-
+    
     block(
         Expr(:global, name), Expr(:const, name),
         Expr(:var"scope-block",
             block( 
-                Expr(:hardscope),
+                :hardscope,
                 local_def(name),
                 map(v -> Expr(:local, v), params)...,
                 map((n,v) -> make_assignment(n, bounds_to_TypeVar(v, true)), params, bounds)...,
                 Expr(:var"toplevel-only", :struct, outerref(name)),
-                make_assignment(name, call(core(:_structtype), Expr(:thismodule), inert( name), call(core(:svec), params...), 
+                make_assignment(name, call(core(:_structtype), (:thismodule), inert( name), call(core(:svec), params...), 
                     call(core(:svec), map(quotify, field_names)...), 
                     mut, min_initialized)),
                 call(core(:_setsuper!), name, super),
@@ -108,11 +108,11 @@ function struct_def_expr_(name, params::Vector, bounds, super, fields0, mut)
                                 end)...),
                             make_assignment(outerref(name), name))),
                     make_assignment(outerref(name), name)),
-                call(core(:_typebody!), name, call(core(:svec), field_types...)), nothing)),
+                call(core(:_typebody!), name, call(core(:svec), field_types...)), :null)),
         # inner constructors
         Expr(:var"scope-block",
             block(
-                Expr(:hardscope),
+                :hardscope,
                 Expr(:global, name),
                 map(c -> rewrite_ctor(c, name, params, field_names, field_types), defs2)...)),
         # outer constructors
@@ -124,7 +124,7 @@ function struct_def_expr_(name, params::Vector, bounds, super, fields0, mut)
         else
             []
         end)...,
-    nothing
+    :null
     )
 end
 
@@ -216,9 +216,10 @@ function default_inner_ctors(name, field_names, field_types, params, bounds, loc
 
     if isempty(params) && any(t -> t != Expr(:core, :Any), field_types) 
         [Expr(:if, 
-            foldl((t, u) -> Expr(:&&, u, call(core(:(===)), core(Any), t)), 
-            field_types[2:end], init = call(core(:(===)), core(:Any), field_types[1])),
-            block(), Expr(:function, call(name, map(make_decl, field_names, field_types)...), block(locs..., Expr(:new, Expr(:outerref, name), field_names...))))]
+            foldl((a,b) -> Expr(:&&, a, b), map(t -> call(core(:(===)), core(:Any), t), field_types)),
+            block(), Expr(:function, call(name, map(make_decl, field_names, field_types)...), block(locs..., Expr(:new, Expr(:outerref, name), field_names...)))),
+            any_ctor
+        ]
     else
         [any_ctor]
     end

@@ -5,13 +5,22 @@ inert(arg) = Expr(:inert, arg)
 meta(args...) = Expr(:meta, args...)
 outerref(arg) = Expr(:outerref, arg)
 top(arg::Symbol) = Expr(:top, arg)
+isexpr(x::Expr, head) = x.head === :head
+isexpr(x, head) = false
 
 
 isssavalue(e) = e isa Expr && e.head === :ssavalue
 issymbol(x) = x isa Symbol
 issymbol_like(e) = issymbol(e) || isssavalue(e)
-ispair(x) = x isa Expr
+isinteger(x::Int) = true
+isinteger(x) = false
+ispair(x) = x isa Expr || x isa QuoteNode
 iskwarg(x) = x isa Expr && x.head === :kw
+
+issimple_atom(x::T) where {T<:Union{Number,Char,String,Nothing,Bool}} = true
+issimple_atom(x::Expr) = x.head in (:ssavalue, :thismodule) 
+issimple_atom(x) = false
+
 function isdotop(x) 
     x isa Symbol || return false
     str = String(x)
@@ -45,8 +54,7 @@ isquoted(x) = x isa Expr && x.head in (:quote, :top, :core, :globalref, :outerre
 
 issym_dot(e) = e isa Expr && length(e.args) == 2 && e.head == :. && issymbol_like(e.args[1])
 
-iseffect_free(e) = !(e isa Expr) || isssavalue(e) || issym_dot(e) || isquoted(e) || e.head in (:null, :true, :false)
-isnothing(e) = e isa Expr && e.head == :null
+iseffect_free(e) = !(e isa Expr) || isssavalue(e) || issym_dot(e) || isquoted(e) || e.head in (:null, :true, :false) || e isa Bool || e isa Nothing
 
 isunderscore_symbol(e) = issymbol(e) && all(==('_'), String(e))
 
@@ -67,7 +75,7 @@ make_assignment(l, r) = Expr(:(=), l, r)
 local_def(x) = Expr(:var"local-def", x)
 scope_block(args...) = Expr(:var"scope-block", args...)
 block(args...) = Expr(:block, args...)
-blockify(e) = e isa Expr && e.head == :block ? (isempty(e.args) ? block(:null) : e) : block(e)
+blockify(e) = e isa Expr && e.head == :block ? (isempty(e.args) ? block(nothing) : e) : block(e)
 quotify(e) = Expr(:quote, e)
 
 undot_name(e) = e isa Expr && e.head == :. ? e.args[2].args[1] : e
@@ -170,7 +178,7 @@ isfunction_def(e) = e isa Expr && (e.head === :function || e.head == :-> || (e.h
 
 isif_generated(e) = e isa Expr && length(e.args) == 4 && e.head === :if && e.args[1] === Expr(:generated)
 
-has_parameters(x::Vector) = length(x) > 0 && x[1] isa Expr && x[1].head === :parameters
+has_parameters(x::AbstractArray) = length(x) > 0 && x[1] isa Expr && x[1].head === :parameters
 
 function expr_contains_eq(x, expr)
     x == expr || (expr isa Expr && !isquoted(expr) && any(y -> expr_contains_eq(x, y), expr.args))
@@ -207,22 +215,42 @@ function has_dups(lst)
     !allunique(lst)
 end
 
+# function flatten_ex(head, e)
+#     if isatom(e)
+#         e
+#     else
+#         args = Any[]
+#         for x in e.args
+#             x = flatten_ex(head, x)
+#             if x isa Expr && x.head === head
+#                 for a in x.args
+#                     push!(args, a)
+#                 end
+#             else
+#                 push!(args, x)
+#             end
+#         end
+#         Expr(e.head, args...)
+#     end
+# end
+
 function flatten_ex(head, e)
     if isatom(e)
         e
     else
-        args = Any[]
+        # Expr(e.head, vcat(map(x -> isexpr(x, head) ? flatten_ex(head, x).args : x, e.args))...)
+        ex = Expr(e.head)
         for x in e.args
-            x = flatten_ex(head, x)
-            if x isa Expr && x.head === head
-                for a in x.args
-                    push!(args, a)
+            if x isa Expr && x.head == head
+                tmp = flatten_ex(head, x)
+                for a in tmp.args
+                    push!(ex.args, a)
                 end
             else
-                push!(args, x)
+                push!(ex.args, x)
             end
         end
-        Expr(e.head, args...)
+        ex
     end
 end
 
@@ -231,10 +259,10 @@ flatten_blocks(e) = flatten_ex(:block, e)
 function contains(p, expr)
     p(expr) || (expr isa Expr && any(x -> contains(p, x), expr.args))
 end
-
+contains(p, v::Vector) = any(p, v)
 
 # TODO
-isatom(x) = !(x isa Expr)
+isatom(x) = !(x isa Expr || x isa Bool)
 
 function reset_ssa_counter()
     ssa_counter[1] = 1
@@ -419,7 +447,7 @@ isquoted_sym(x) = (x isa QuoteNode && issymbol(x.value)) || (x isa Expr && x.hea
 function issym_ref(e)
     isnodot_sym_ref(e) ||
     (length(e.args) == 2 && e.head == :. && 
-        (isatom(e.args[1] || issym_ref(e.args[1]))) &&
+        (isatom(e.args[1]) || issym_ref(e.args[1])) &&
         ispair(e.args[2]) && e.args[2].head in (:quote, :inert) &&
         issymbol(e.args[2].args[1])
     )
@@ -477,6 +505,8 @@ function undotop(op)
     end
 end
 
+
+# Expr(:lambda, [], [], body)
 lam_args(x) = x.args[1]
 lam_argnames(x) = llist_vars(lam_args(x))
 lam_vinfo(x) = x.args[2]
@@ -575,3 +605,13 @@ end
 
 
 defined_julia_global(v) = false # todo
+
+
+function first_non_meta(blk)
+    for elt in blk
+        if !(elt isa Expr && elt.head === :meta)
+            return elt
+        end
+    end
+    false
+end

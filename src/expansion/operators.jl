@@ -168,7 +168,7 @@ function expand_eq(e)
             end
         end
 
-        chain_assign_loop([lhs], e.args[2])
+        chain_assign_loop(Any[lhs], e.args[2])
     elseif (issymbol_like(lhs) && isvalid_name(lhs)) || isglobalref(lhs) || isouterref(lhs)
         sink_assignment(lhs, expand_forms(e.args[2]))
     elseif isatom(lhs)
@@ -185,9 +185,9 @@ function expand_eq(e)
             bb = isatom(b) || issymbol_like(b) || (b isa Expr && isquoted(b)) ? b : make_ssavalue()
             rr = issymbol_like(rhs) || isatom(rhs) ? rhs : make_ssavalue()
             Expr(:block,
-                aa == a ? [] : [sink_assignment(aa, expand_forms(a))],
-                bb == b ? [] : [sink_assignment(bb, expand_forms(b))],
-                rr == rhs ? [] : [sink_assignment(rr, expand_forms(rhs))],
+                (aa == a ? [] : [sink_assignment(aa, expand_forms(a))])...,
+                (bb == b ? [] : [sink_assignment(bb, expand_forms(b))])...,
+                (rr == rhs ? [] : [sink_assignment(rr, expand_forms(rhs))])...,
                 call(top(:setproperty!), aa, bb, rr),
                 Expr(:unnecessary, rr))
         elseif lhs.head === :tuple #L2081
@@ -266,7 +266,7 @@ function expand_eq(e)
             rhs = e.args[2]
             reuse = a isa Expr && contains(x -> x == :end, idxs)
             arr = reuse ? make_ssavalue() : a
-            stmts = reuse ? Expr(:(=), arr, expand_forms(a)) : ()
+            stmts = reuse ? [Expr(:(=), arr, expand_forms(a))] : ()
             rrhs = rhs isa Expr && !isssavalue(rhs) && !isquoted(rhs)
             r = rrhs ? make_ssavalue() : rhs
             rini = rrhs ? [(sink_assignment(r, expand_forms(rhs)))] : ()
@@ -296,7 +296,7 @@ function expand_eq(e)
 end
 
 
-expand_or(e::Expr) = expand_or(flatten_ex(:||, e).args, 1)
+expand_or(e::Expr) = expand_forms(expand_or(flatten_ex(:||, e).args, 1))
 
 function expand_or(e, i)
     if isempty(e)
@@ -315,7 +315,7 @@ function expand_or(e, i)
     end
 end
 
-expand_and(e::Expr) = expand_and(flatten_ex(:&&, e).args, 1)
+expand_and(e::Expr) = expand_forms(expand_and(flatten_ex(:&&, e).args, 1))
     
 function expand_and(e, i)
     if isempty(e)
@@ -333,7 +333,7 @@ end
 function lower_update_op(e)
     str = string(e.head)
     expand_forms(expand_update_operator(
-            str[1:end-1],
+            Symbol(str[1:end-1]),
             str[1] == '.' ? :.= : :(=),
             e.args[1],
             e.args[2]

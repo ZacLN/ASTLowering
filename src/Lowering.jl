@@ -39,10 +39,10 @@ end
 
 function julia_expand1(ex, file, line)
     ex = resolve_scopes(ex)
-    ex = analyze_variables(ex)
-    ex = closure_convert(ex)
+    ex = analyze_variables!(ex)
+    # ex = closure_convert(ex)
     ex = linearize(ex)
-    compact_and_renumber(ex)
+    # compact_and_renumber(ex)
 end
 
 function julia_expand0(ex, file, line)
@@ -63,7 +63,7 @@ function julia_expand(ex, file = :none, line = 0)
     ex = resolve_scopes(ex)
     ex = analyze_variables!(ex)
     # ex = closure_convert(ex)
-    # ex = linearize(ex)
+    ex = linearize(ex)
     # ex = compact_and_renumber(ex)
     ex
 end
@@ -85,11 +85,60 @@ end
 function istoplevel_only_expr(e)
     e isa Expr && (e.head in (:toplevel, :line, :module, :import, :using, :export, :error, :incomplete) || (e.head in (:global, :const) && all(issymbol, e.args)))
 end
+in_expand = false
 
 function expand_toplevel_expr(e, file, line)
     if isatom(e) || istoplevel_only_expr(e)
-        isunderscore_symbol(e) && error("all-underscore")
+        isunderscore_symbol(e) && error("all-underscore identifier used as rvalue")
+        e
+    else
+        last = in_expand
+        if !last
+            reset_gensyms()
+            global in_expand = true
+        end
+        e = expand_toplevel_expr__(e, file, line)
+        global in_expand = last
+        e
+        
     end
+end
+
+function expand_to_thunk_(expr, file, line)
+    try
+        expand_toplevel_expr(expr, file, line)
+    catch e
+        e
+    end
+end
+
+function expand_to_thunk_stmt_(expr, file, line)
+    expand_to_thunk_(istoplevel_only_expr(expr) ? expr : block(expr, nothing), file, line)
+end
+
+function jl_expand_to_thunk_warn(expr, file, line, stmt)
+    if stmt
+        expand_to_thunk_stmt_(expr, file, line)
+    else
+        expand_to_thunk_(expr, file, line)
+    end
+end
+
+jl_expand_to_thunk(expr, file, line) = expand_to_thunk_(expr, file, line)
+jl_expand_to_thunk_stmt(expr, file, line) = expand_to_thunk_stmt_(expr, file, line)
+julia_expand_macroscope(expr) = julia_expand_macroscope(expr)
+
+function module_default_defs(e)
+    name = e.args[2]
+    body = e.args[3]
+    loc = !isempty(body.args) && isexpr(first(body.args), :line) ? [first(body.args)] : []
+    x = name == :x ? :y : :x
+    mex = name == :mapexpr ? :map_expr : :mapexpr
+    jl_expand_to_thunk(block(
+        make_assignment(call(:eval, x), block(loc..., call(core(:eval), name, x))),
+        make_assignment(call(:include, x), block(loc..., call(core(:_call_latest), top(:include), name, x))),
+        make_assignment(call(:include, Expr(:(::), mex, top(:Function), x)), block(loc..., call(core(:_call_latest), top(:include), mex, name, x)))
+    ), :none, 0)
 end
 
 function Base.show_unquoted_expr_fallback(io::IO, ex::Expr, indent::Int, quote_level::Int)
