@@ -2,7 +2,7 @@ function linearize(e)
     if !(e isa Expr) || isquoted(e)
         e
     elseif e.head === :lambda
-        e.args[4:end] = compile_body(e.args[3], e.args[2][1:2], e)
+        e.args[3] = compile_body(e.args[3], merge(e.args[2][1], e.args[2][2]), e)
     else
         e1 = Expr(e.head)
         for a in e.args
@@ -12,14 +12,6 @@ function linearize(e)
     end
     e
 end
-
-isvalid_ir_argument(e) = issimple_atom(e) || issymbol(e) || (e isa Expr && e.head in (:quote, :inert, :top, :core, :globalref, :outerref, :slot, :static_parameter, :boundscheck))
-
-isvalid_ir_value(lhs, e) = isssavalue(lhs) || 
-                           isvalid_ir_argument(e) ||
-                           (issymbol(lhs) && e isa Expr && e.head in (:new, :splatnew, :the_expection, :isdefined, :call, :invoke, :foreigncall, :cfunction, :gc_preserve_begin, :copyast, :new_opaque_closure))
-
-isvalid_ir_return(e) = isvalid_ir_argument(e) || (e isa Expr && e.head === :lambda)
 
 # this pass behaves like an interpreter on the given code.
 # to perform stateful operations, it calls `emit` to record that something
@@ -116,7 +108,7 @@ function compile_body(e, vi, lam)
             emit(Expr(:return, tmp !== false ? tmp : x))
         end
 
-        if x
+        if x !== false # todo: is this right?
             if handler_level > 0
                 tmp = if issimple_atom(x) && (!isssavalue(x) || finally_handler == false)
                     false
@@ -176,13 +168,13 @@ function compile_body(e, vi, lam)
                 string("\"$h\"")
             end
         end
-        if !isempty(lam[2]) # todo: use lam accessor func
-            error("$(head_to_text(h)) expression not at top level")
+        if !isempty(lam.args[2]) # todo: use lam accessor func
+            error("$(head_to_text(e.head)) expression not at top level")
         end
     end
 
     function compile_args(lst, break_labels)
-        issimple = all(x -> issimple_atom(x) || issymbol(x) || (x isa Expr && x.head in (:quote, :inert, :top, :core, :globalref, :outerref, :boundscheck)), lst)
+        issimple = all(x -> issimple_atom(x) || issymbol(x) || x isa QuoteNode || (x isa Expr && x.head in (:quote, :inert, :top, :core, :globalref, :outerref, :boundscheck)), lst)
 
         vals = []
         for arg in lst
@@ -231,9 +223,9 @@ function compile_body(e, vi, lam)
     end
 
     function compile(e, break_labels, value::Bool, tail::Bool)
-        if !(e isa Expr || e.head in (:null, :true, :false, :ssavalue, :quote, :inert, :top, :core, :copyast, :the_expection, :$, :globalref, :outerref, :thismodule, :cdecl, :stdcall, :fastcall, :thiscall, :llvmcall))
-            e1 = get(arg_map, e, e)
-            if value || isunderscore_symbol(e) || (e isa Expr && (e.head == :outerref || e.head == :globalref) && isunderscore_symbol(e.args[1]))
+        if e isa Nothing || e isa Bool || e isa QuoteNode|| !(e isa Expr) || e.head in (:null, :true, :false, :ssavalue, :quote, :inert, :top, :core, :copyast, :the_expection, :$, :globalref, :outerref, :thismodule, :cdecl, :stdcall, :fastcall, :thiscall, :llvmcall)
+            e1 = arg_map isa Dict ? get(arg_map, e, e) : e
+            if value && (isunderscore_symbol(e) || (e isa Expr && (e.head == :outerref || e.head == :globalref) && isunderscore_symbol(e.args[1])))
                 error("all-underscore identifier used as rvalue $(format_loc(current_loc))")
             end
 
@@ -269,7 +261,7 @@ function compile_body(e, vi, lam)
                 else
                     compile_args(e.args, break_labels)
                 end
-                callex = Expr(e.head, args)
+                callex = Expr(e.head, args...)
 
                 if tail
                     emit_return(callex)
@@ -286,7 +278,7 @@ function compile_body(e, vi, lam)
                     rhs = compile(e.args[2], break_labels, true, false)
                     lhs = arg_map !== false && issymbol(lhs) ? get(arg_map, lhs, lhs) : lhs
                     if value && rhs
-                        rr = isatom(rhs) || isssavalue(rhs) || rhs == nothing ? rhs : make_ssavalue()
+                        rr = isatom(rhs) || isssavalue(rhs) || rhs === nothing ? rhs : make_ssavalue()
                         if rr != rhs
                             emit(make_assignment(rr, rhs))
                         end
@@ -339,7 +331,38 @@ function compile_body(e, vi, lam)
             elseif e.head === :unnecessary
                 value ? compile(e.args[1], break_labels, value, tail) : false
             elseif e.head === :if || e.head === :elseif
-                
+                cond = e.args[1]
+                if isexpr(cond, :block)
+                    if length(cond.args) > 1
+                        compile(butlast(cond), break_labels, false, false)
+                    end
+                    cond = last(cond.args)
+                end
+                tests = map(function (clause)
+                    emit(Expr(:gotoifnot, compile_cond(clause, break_labels), :_))
+                end, isexpr(cond, :&&) ? cond.args : [cond])
+                end_jump = Expr(:goto, :_)
+                val = value && !tail ? new_mutable_var() : false
+                v1 = compile(e.args[2], break_labels, value, tail)
+
+                if val !== false
+                    emit_assignment(val, v1)
+                end
+                if !tail && (length(e.args) > 2 || val !== false)
+                    emit(end_jump)
+                end
+                elselabel = make_and_mark_label()
+                foreach(test -> (test.args[2] = elselabel), tests)
+                v2 = length(e.args) > 2 ? compile(e.args[3], break_labels, value, tail) : nothing
+                if val !== false
+                    emit_assignment(val, v2)
+                end
+                if !tail
+                    end_jump.args[1] = make_and_mark_label()
+                elseif length(e.args) == 2
+                    emit_return(v2)
+                end
+                val
             elseif e.head === :_while
                 endl = make_label()
                 topl = make_and_mark_label()
@@ -585,12 +608,12 @@ function compile_body(e, vi, lam)
             end
         end
     end
-    for i = 1:length(lam_args(lam))
-        if asgn(vi[i])
+    for k in (lam_args(lam))
+        if asgn(vi[k])
             if arg_map === false
                 arg_map = Dict()
             end
-            arg_map[vi[i].name] = new_mutable_var(vi[i].name)
+            arg_map[vi[k].name] = new_mutable_var(vi[k].name)
         end
     end
 
@@ -622,8 +645,7 @@ function compile_body(e, vi, lam)
 
     stmts = code
     di = definitely_initialized_vars(stmts, vi) # todo typeof di?
-    body = block(filter(e -> !(e isa Expr && e.head === :newvar && haskey(di, e.args[1])), stmts))
-
+    body = block(filter(e -> !(e isa Expr && e.head === :newvar && haskey(di, e.args[1])), stmts)...)
     if arg_map !== false
         argmap2 = []
         for (k,v) in arg_map
@@ -677,3 +699,14 @@ function for_each_isdefined(f, e)
         foreach(x -> for_each_isdefined(f, x), e.args)
     end
 end
+
+format_loc(x) = x
+
+
+isvalid_ir_argument(e) = issimple_atom(e) || issymbol(e) || e isa QuoteNode || (e isa Expr && e.head in (:quote, :inert, :top, :core, :globalref, :outerref, :slot, :static_parameter, :boundscheck))
+
+isvalid_ir_value(lhs, e) = isssavalue(lhs) || 
+                           isvalid_ir_argument(e) ||
+                           (issymbol(lhs) && e isa Expr && e.head in (:new, :splatnew, :the_expection, :isdefined, :call, :invoke, :foreigncall, :cfunction, :gc_preserve_begin, :copyast, :new_opaque_closure))
+
+isvalid_ir_return(e) = isvalid_ir_argument(e) || (e isa Expr && e.head === :lambda)

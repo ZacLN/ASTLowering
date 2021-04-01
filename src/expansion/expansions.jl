@@ -381,7 +381,7 @@ function expand_decl(e)
     if !issymbol_like(e.args[1])
         call(core(:typeassert), expand_forms(e.args[1]), expand_forms(e.args[2]))
     else
-        e = Expr(e.head, expand_forms(e.args[1]), expand_forms(e.args[2]))
+        Expr(e.head, expand_forms(e.args[1]), expand_forms(e.args[2]))
     end    
 end
 

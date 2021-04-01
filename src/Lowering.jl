@@ -126,7 +126,7 @@ end
 
 jl_expand_to_thunk(expr, file, line) = expand_to_thunk_(expr, file, line)
 jl_expand_to_thunk_stmt(expr, file, line) = expand_to_thunk_stmt_(expr, file, line)
-julia_expand_macroscope(expr) = julia_expand_macroscope(expr)
+julia_expand_macroscope(expr) = julia_expand_macroscopes_(expr)
 
 function module_default_defs(e)
     name = e.args[2]

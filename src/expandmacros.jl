@@ -80,7 +80,7 @@ function vars_introduced_by_patterns(x)
     elseif isexpr(x, :function) && isexpr(x.args[1], :tuple)
         vars_introduced_by_patterns(Expr(:(->), Expr(:tuple, x.args[1].args...), x.args[2]))
     elseif isexpr(x, :(->))
-        a = isexpr(x.args[1], :tuple) ? a.args : [a]
+        a = isexpr(x.args[1], :tuple) ? x.args : [x]
         Expr(:varlist, safe_llist_positional_args(fix_arglist(a)))
     elseif isexpr(x, :where)
         Expr(:varlist, typevar_names(x.args[2:end])...)
@@ -400,7 +400,7 @@ function new_expansion_env_for(x, env, outermost = false)
     else
         globals = find_declared_vars_in_expansion(x, :global)
         vlist = isexpr(introduced, :varlist) ? introduced.args : []
-        pairs, vnames = separate(isa(Expr), vlist)
+        pairs, vnames = separate(a -> a isa Expr, vlist)
 
         v = setdiff(unique(vcat(find_declared_vars_in_expansion(x, :local), find_assigned_vars_in_expansion(x), vnames)), globals)
         

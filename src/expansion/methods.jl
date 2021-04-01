@@ -235,7 +235,7 @@ function method_lambda_expr(argl::Vector, body::Expr, rett)
     end, argl)
     body = blockify(body)
     
-    Expr(:lambda, (length(argl) == 1 ? argl[1] : Expr(argl...)), (), scope_block(if rett == Expr(:core, :Any)
+    Expr(:lambda, argl, [], scope_block(if rett == Expr(:core, :Any)
             body
         else
             meta = take_while(x -> ispair(x) && x.head in (:line, :meta), body.args)

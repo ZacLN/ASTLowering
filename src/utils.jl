@@ -262,7 +262,7 @@ end
 contains(p, v::Vector) = any(p, v)
 
 # TODO
-isatom(x) = !(x isa Expr || x isa Bool)
+isatom(x) = !(x isa Expr)
 
 function reset_ssa_counter()
     ssa_counter[1] = 1

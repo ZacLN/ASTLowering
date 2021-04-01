@@ -1,6 +1,6 @@
 function find_assigned_vars(e, vars = [])
-    if !(e isa Expr) || isquoted(e)
-        ()
+    if !(e isa Expr) || isquoted(e) || e.head in (:lambda, :var"scope-block", :module, :toplevel)
+        []
     else
         if e.head in (:lambda, :var"scope-block", :module, :toplevel)
             []
@@ -8,7 +8,7 @@ function find_assigned_vars(e, vars = [])
             v = decl_var(method_expr_name(e))
             issymbol(v) && push!(vars, v)
             length(e.args) !== 1 && find_assigned_vars(e.args[2], vars)
-        elseif e.head == :(=)
+        elseif e.head === :(=)
             v = decl_var(e.args[1])
             find_assigned_vars(e.args[2], vars)
             if isssavalue(v) || isglobalref(v) || isouterref(v) || isunderscore_symbol(v)
@@ -252,7 +252,7 @@ function resolve_scopes_scope_block(e::Expr, scope, sp, loc)
     end
 
     if lam isa Expr
-        lam.args[3] = vcat(lam.args[3], newnames, new_names_def)
+        append!(lam.args[2], newnames, new_names_def)
         #todo : structure of lam not clear
     end
 

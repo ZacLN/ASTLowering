@@ -29,9 +29,7 @@ function lambda_all_vars(e::Expr)
     vcat(lam_argnames(e), e.args[2])
 end
 
-free_vars(e::Union{Symbol,Expr}) = (free_vars_(e, Set{Symbol}()))
-
-function free_vars_(e, tab::Set{Symbol})
+function free_vars(e, tab::Set{Symbol} = Set{Symbol}())
     if e == UNUSED || isunderscore_symbol(e)
         tab
     elseif issymbol(e)
@@ -40,18 +38,23 @@ function free_vars_(e, tab::Set{Symbol})
     elseif isouterref(e)
         tab
     elseif e isa Expr && e.head == :var"break-block"
-        free_vars_(e.args[2], tab)
+        free_vars(e.args[2], tab)
     elseif e isa Expr && e.head == :var"with-static-parameters"
-        free_vars_(e.args[2], tab)
+        free_vars(e.args[2], tab)
     elseif isatom(e) || isquoted(e)
         tab
     elseif e.head === :lambda
         bound = lambda_all_vars(e)
         foreach(v -> !(v in bound) && push!(tab, v), free_vars(lam_body(e)))
         tab
-    else
-        foreach(x -> free_vars_(x, tab), e.args)
+    elseif e isa Expr
+        foreach(x -> free_vars(x, tab), e.args)
         tab
+    elseif e isa Vector
+        foreach(x -> free_vars(x, tab), e.args)
+        tab
+    else 
+        error()
     end
 end
 

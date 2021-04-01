@@ -87,8 +87,8 @@ function convert_assignment(var, rhs0, fname, lam, interp)
         vi = get(lam_vinfo(lam)[1], var, nothing)
         cv = get(lam_vinfo(lam)[2], var, nothing)
         vt = (vi !== nothing && vinfo_type(vi)) || (cv !== nothing && vinfo_type(cv)) || core(:Any)
-        closed = cv !== nothing && vinfo_asgn(cv) && cinfo_capt(cv)
-        capt = vi !== nothing && vinfo_asgn(vi) && cinfo_capt(vi)
+        closed = cv !== nothing && asgn(cv) && capt(cv)
+        capt = vi !== nothing && asgn(vi) && capt(vi)
 
         if !closed && !capt && vt == core(:Any)
             make_assignment(var, rhs0)
@@ -96,9 +96,9 @@ function convert_assignment(var, rhs0, fname, lam, interp)
             rhs1 = (issimple_atom(rhs0) || rhs0 == Expr(:the_exception)) ? rhs0 : make_ssavalue()
             rhs = vt == core(:Any) ? rhs1 : convert_for_type_decl(rhs1, cl_convert(vt, fname, lam, false, false, false, interp))
             ex = if closed 
-                call(core(:setfield!), interp ? Expr(:$, var) : capt_var_access(var, fname, opaq), inert(:contents), rhs)
+                call(core(:setfield!), interp ? Expr(:$, var) : call(core(:getfield), fname, inert(var)), inert(:contents), rhs)
             elseif capt
-                call(core(:setfield!), var, intert(:contents), rhs)
+                call(core(:setfield!), var, inert(:contents), rhs)
             else
                 make_assignment(var, rhs)
             end
@@ -144,8 +144,9 @@ function fix_function_arg_type(te::Expr, typ, iskw, namemap, type_sp)
     typapp = te.args[2]
     types = rename_sig_types(typapp.args[2:end], namemap)
     closure_type = isempty(type_sp) ? typ : call(core(:apply_type), typ, type_sp...)
-    newtypes = iskw ? Expr(types.head, types.args[1], closure_type, types.args[3:end]...) : d
-    error()
+    newtypes = iskw ? Expr(types.head, types.args[1], closure_type, types.args[3:end]...) : Expr(closure_type, types...)
+    loc = te.args[4]
+    call(core(:svec), call(core(:svec), newtypes...), call(core(:svec), te.args[3].args[2:end], type_sp...), loc)
 end
 
 function lift_toplevel(e)
@@ -180,7 +181,7 @@ function add_box_inits_to_body(lam, body)
     for arg in lam_args(lam)
         arg = arg_name(arg)
         vi = get(vis, arg, nothing)
-        if vi !== nothing && vinfo_asgn(vi) && vinfo_capt(vi)
+        if vi !== nothing && asgn(vi) && capt(vi)
             push!(inits, make_assignment(arg, call(core(:Box), arg)))
         end
     end
@@ -189,7 +190,7 @@ end
 
 function all_methods_for(ex, body)
     mname = method_expr_name(ex)
-    expr_find_all(x -> s isa Expr && length(s.args) > 1 && s.head === :method && method_expr_name(s) == mname,
+    expr_find_all(s -> s isa Expr && length(s.args) > 1 && s.head === :method && method_expr_name(s) == mname,
         body,
         identity,
         x -> x isa Expr && x.head !== :lambda)
